@@ -37,6 +37,7 @@ type MeshPeerEntry = {
   signalSent: boolean;
   mode: "direct" | "relay";
   relayFallbackTried: boolean;
+  directRestartTried: boolean;
   initiator: boolean;
   pendingIce: RTCIceCandidateInit[];
 };
@@ -434,6 +435,32 @@ export class DocsCollabMesh {
     }
   }
 
+  private async restartDirect(remoteId: string, entry: MeshPeerEntry): Promise<boolean> {
+    if (!entry.initiator || entry.mode !== "direct" || entry.directRestartTried) {
+      return false;
+    }
+    entry.directRestartTried = true;
+    entry.link = "connecting";
+    this.emit({ type: "link" });
+    this.debug("direct-restart-start", {
+      remoteId,
+      mode: entry.mode,
+    });
+
+    try {
+      await this.logConnectionDiagnostics(remoteId, entry.pc, "relay-restart");
+      entry.pc.restartIce();
+      const offer = await entry.pc.createOffer({ iceRestart: true });
+      await entry.pc.setLocalDescription(offer);
+      await this.sendSignal(remoteId, "offer", entry.pc.localDescription);
+      this.debug("direct-restart-offer-sent", { remoteId });
+      return true;
+    } catch (error) {
+      this.debug("direct-restart-error", { remoteId, error });
+      return false;
+    }
+  }
+
   private makePc(remoteId: string, mode: "direct" | "relay"): RTCPeerConnection {
     const pc = new RTCPeerConnection(toRtcConfig(this.rtcSettings, mode));
     this.debug("pc-created", {
@@ -483,7 +510,12 @@ export class DocsCollabMesh {
       if (!entry) return;
       if (pc.connectionState === "failed") {
         void this.logConnectionDiagnostics(remoteId, pc, "failed");
-        void this.restartWithRelay(remoteId, entry);
+        void (async () => {
+          const restartedDirect = await this.restartDirect(remoteId, entry);
+          if (!restartedDirect) {
+            await this.restartWithRelay(remoteId, entry);
+          }
+        })();
       }
     };
     pc.oniceconnectionstatechange = () => {
@@ -502,7 +534,12 @@ export class DocsCollabMesh {
         }
         if (pc.iceConnectionState === "failed") {
           void this.logConnectionDiagnostics(remoteId, pc, "failed");
-          void this.restartWithRelay(remoteId, entry);
+          void (async () => {
+            const restartedDirect = await this.restartDirect(remoteId, entry);
+            if (!restartedDirect) {
+              await this.restartWithRelay(remoteId, entry);
+            }
+          })();
         }
       }
     };
@@ -574,6 +611,7 @@ export class DocsCollabMesh {
       signalSent: false,
       mode,
       relayFallbackTried: mode === "relay",
+      directRestartTried: false,
       initiator,
       pendingIce: [],
     };
@@ -704,6 +742,7 @@ export class DocsCollabMesh {
         signalSent: false,
         mode,
         relayFallbackTried: mode === "relay",
+        directRestartTried: false,
         initiator: false,
         pendingIce: [],
       };
@@ -736,6 +775,7 @@ export class DocsCollabMesh {
         signalSent: false,
         mode,
         relayFallbackTried: mode === "relay",
+        directRestartTried: false,
         initiator: false,
         pendingIce: [],
       };
