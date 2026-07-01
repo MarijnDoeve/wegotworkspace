@@ -1,0 +1,117 @@
+FROM php:8.3-apache-bookworm
+
+# Extension build deps — same as dev Dockerfile minus git/curl (not needed at runtime).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        unzip \
+        libonig-dev \
+        libzip-dev \
+        libicu-dev \
+        libxml2-dev \
+        libsqlite3-dev \
+        default-libmysqlclient-dev \
+        libc-client-dev \
+        libkrb5-dev \
+    && docker-php-ext-configure imap --with-kerberos --with-imap-ssl \
+    && docker-php-ext-install \
+        pdo \
+        pdo_sqlite \
+        pdo_mysql \
+        mbstring \
+        zip \
+        intl \
+        imap \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Modules commonly enabled on shared Apache + cPanel-style hosts.
+# Strip the Debian default Alias /icons/ — see dev Dockerfile comment.
+RUN a2enmod \
+        rewrite \
+        headers \
+        env \
+        mime \
+        dir \
+        alias \
+        negotiation \
+        setenvif \
+        deflate \
+        filter \
+        authz_core \
+        authz_host \
+        auth_basic \
+        ssl \
+    && sed -i '/^Alias \/icons\//d' /etc/apache2/mods-available/alias.conf \
+    && ! grep -q '^Alias /icons/' /etc/apache2/mods-available/alias.conf
+
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+
+ENV APACHE_DOCUMENT_ROOT=/var/www/install
+RUN sed -ri -e 's!/var/www/html!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/sites-available/*.conf \
+    && sed -ri -e 's!/var/www/!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/apache2.conf /etc/apache2/conf-available/*.conf
+
+COPY docker/apache/vhost.conf /etc/apache2/conf-available/wgw-vhost.conf
+COPY docker/apache/http-vhost.conf /etc/apache2/conf-available/wgw-http-vhost.conf
+COPY docker/apache/http-redirect.conf /etc/apache2/conf-available/wgw-http-redirect.conf
+COPY docker/apache/ssl-vhost.conf /etc/apache2/conf-available/wgw-ssl-vhost.conf
+# Enable shared vhost rules and plain HTTP. TLS can be added at runtime via an env var or
+# by mounting certs and running a2enconf; the slim entrypoint does not configure TLS.
+RUN a2enconf wgw-vhost wgw-http-vhost
+
+# Application files. apps/wegotworkspace/packages and apps/wegotworkspace/wgw-content are
+# excluded by .dockerignore so they are never baked in.
+COPY apps/wegotworkspace /var/www/install
+COPY packages/api /var/www/packages/api
+COPY packages/apps /var/www/packages/apps
+
+WORKDIR /var/www/packages/api
+
+# Production Composer install — no dev dependencies.
+RUN composer install --no-dev --optimize-autoloader --no-interaction --prefer-dist
+
+# Bootstrap: replicate the first-request setup from docker-entrypoint.sh at build time so
+# the container starts without any first-request delay.
+RUN set -eu; \
+    INSTALL_ROOT=/var/www/install; \
+    API_ROOT=/var/www/packages/api; \
+    \
+    # wgw-config.php (installer UI config template) \
+    if [ -f "${INSTALL_ROOT}/wgw-config.sample.php" ] && [ ! -f "${INSTALL_ROOT}/wgw-config.php" ]; then \
+        cp "${INSTALL_ROOT}/wgw-config.sample.php" "${INSTALL_ROOT}/wgw-config.php"; \
+    fi; \
+    \
+    # .env \
+    cp "${API_ROOT}/.env.example" "${API_ROOT}/.env"; \
+    sed -i \
+        -e 's/^APP_ENV=.*/APP_ENV=production/' \
+        -e 's/^APP_DEBUG=.*/APP_DEBUG=false/' \
+        "${API_ROOT}/.env"; \
+    \
+    # APP_KEY — baked in as a fallback; override at runtime via APP_KEY env var \
+    php "${API_ROOT}/artisan" key:generate --force --no-interaction; \
+    \
+    # .htaccess \
+    if [ -f "${INSTALL_ROOT}/example.htaccess" ] && [ ! -f "${INSTALL_ROOT}/.htaccess" ]; then \
+        cp "${INSTALL_ROOT}/example.htaccess" "${INSTALL_ROOT}/.htaccess"; \
+    fi; \
+    \
+    # Storage directories \
+    mkdir -p \
+        "${INSTALL_ROOT}/wgw-content" \
+        "${API_ROOT}/storage/framework/cache" \
+        "${API_ROOT}/storage/framework/sessions" \
+        "${API_ROOT}/storage/framework/views" \
+        "${API_ROOT}/storage/logs" \
+        "${API_ROOT}/bootstrap/cache"; \
+    chown -R www-data:www-data \
+        "${INSTALL_ROOT}/wgw-content" \
+        "${API_ROOT}/storage" \
+        "${API_ROOT}/bootstrap/cache"
+
+COPY docker/apache/docker-entrypoint.prod.sh /usr/local/bin/wgw-apache-entrypoint-prod
+RUN chmod +x /usr/local/bin/wgw-apache-entrypoint-prod
+
+EXPOSE 80
+
+ENTRYPOINT ["wgw-apache-entrypoint-prod"]
+CMD ["apache2-foreground"]

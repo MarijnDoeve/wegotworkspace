@@ -1,0 +1,73 @@
+# Production compose template — fill in the marked values before running.
+#
+# Quick start:
+#   docker compose -f compose.prod.yaml up --build
+#
+# For a real deployment, set APP_KEY, APP_URL, and DB_PASSWORD at minimum.
+# Persistent volumes ensure user data survives container recreates.
+#
+# Set the database password in a .env file next to this compose file (gitignored):
+#   echo 'DB_PASSWORD=your-strong-password' >> .env
+
+services:
+  php:
+    build:
+      context: .
+      dockerfile: docker/apache/Dockerfile.prod
+    ports:
+      # Change to e.g. "127.0.0.1:8080:80" when running behind a reverse proxy (nginx, Caddy).
+      - "80:80"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # Override the build-time APP_KEY with your own secret so it is not baked into the image.
+      # Generate one: docker run --rm wgw-prod php /var/www/packages/api/artisan key:generate --show
+      APP_KEY: "base64:REPLACE_ME"
+
+      # Public URL used in generated links, password-reset mails, etc.
+      APP_URL: "https://your-domain.example.com"  # replace with your domain
+
+      # Database — wired to the db service below.
+      DB_CONNECTION: mysql
+      DB_HOST: db
+      DB_PORT: 3306
+      DB_DATABASE: wegotworkspace
+      DB_USERNAME: wgw
+      DB_PASSWORD: "${DB_PASSWORD}"  # set DB_PASSWORD in .env or the shell environment
+
+      # Mail — optional; defaults to the log driver (mails are written to storage/logs).
+      # MAIL_MAILER: smtp
+      # MAIL_HOST: smtp.example.com   # replace with your SMTP host
+      # MAIL_PORT: 587
+      # MAIL_USERNAME: "REPLACE_ME"
+      # MAIL_PASSWORD: "REPLACE_ME"
+      # MAIL_FROM_ADDRESS: "no-reply@your-domain.example.com"
+      # MAIL_FROM_NAME: "WeGotWorkspace"
+    volumes:
+      # Persist user uploads outside the container.
+      # Create on the host first: mkdir -p ./data/wgw-content
+      - ./data/wgw-content:/var/www/install/wgw-content
+
+      # Persist Laravel logs, sessions, and cache outside the container.
+      # Create on the host first: mkdir -p ./data/storage
+      - ./data/storage:/var/www/packages/api/storage
+    restart: unless-stopped
+
+  db:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: wegotworkspace
+      MYSQL_USER: wgw
+      MYSQL_PASSWORD: "${DB_PASSWORD}"       # same var as the php service above
+      MYSQL_ROOT_PASSWORD: "${DB_ROOT_PASSWORD}"  # root password — change separately if preferred
+    volumes:
+      # Persist the database outside the container.
+      # Create on the host first: mkdir -p ./data/mysql
+      - ./data/mysql:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "wgw", "-p${DB_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
