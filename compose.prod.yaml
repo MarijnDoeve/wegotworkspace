@@ -1,7 +1,7 @@
 # Production compose template — fill in the marked values before running.
 #
 # Quick start:
-#   docker compose -f compose.prod.yaml up --build
+#   docker compose -f compose.prod.yaml up
 #
 # For a real deployment, set APP_KEY, APP_URL, and DB_PASSWORD at minimum.
 # Persistent volumes ensure user data survives container recreates.
@@ -11,9 +11,9 @@
 
 services:
   php:
-    build:
-      context: .
-      dockerfile: docker/apache/Dockerfile.prod
+    # Pin to a specific release tag (e.g. ghcr.io/woutervroege/wegotworkspace:1.2.3)
+    # to avoid unexpected updates. Use :latest only for quick evaluation.
+    image: ghcr.io/woutervroege/wegotworkspace:latest
     ports:
       # Change to e.g. "127.0.0.1:8080:80" when running behind a reverse proxy (nginx, Caddy).
       - "80:80"
